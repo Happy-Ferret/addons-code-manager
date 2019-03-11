@@ -4,7 +4,7 @@ import log from 'loglevel';
 import { DiffInfo } from 'react-diff-view';
 
 import { ThunkActionCreator } from '../configureStore';
-import { getVersion, getVersionsList, isErrorResponse } from '../api';
+import { getDiff, getVersion, getVersionsList, isErrorResponse } from '../api';
 import { LocalizedStringMap } from '../utils';
 
 type VersionId = number;
@@ -190,14 +190,24 @@ export type VersionsMap = {
   unlisted: VersionsList;
 };
 
+type CompareInfo = {
+  diffs: DiffInfo[];
+  mimeType: string;
+};
+
+export type CompareInfoMap = {
+  [path: string]: CompareInfo;
+};
+
 export const actions = {
   loadVersionFile: createAction('LOAD_VERSION_FILE', (resolve) => {
     return (payload: { path: string; version: ExternalVersionWithContent }) =>
       resolve(payload);
   }),
   loadVersionInfo: createAction('LOAD_VERSION_INFO', (resolve) => {
-    return (payload: { version: ExternalVersionWithContent }) =>
-      resolve(payload);
+    return (payload: {
+      version: ExternalVersionWithContent | ExternalVersionWithDiff;
+    }) => resolve(payload);
   }),
   updateSelectedPath: createAction('UPDATE_SELECTED_PATH', (resolve) => {
     return (payload: { selectedPath: string; versionId: VersionId }) =>
@@ -207,11 +217,36 @@ export const actions = {
     return (payload: { addonId: number; versions: ExternalVersionsList }) =>
       resolve(payload);
   }),
+  beginFetchDiff: createAction('BEGIN_FETCH_DIFF', (resolve) => {
+    return (payload: {
+      addonId: number;
+      baseVersionId: VersionId;
+      headVersionId: VersionId;
+    }) => resolve(payload);
+  }),
+  abortFetchDiff: createAction('ABORT_FETCH_DIFF', (resolve) => {
+    return (payload: {
+      addonId: number;
+      baseVersionId: VersionId;
+      headVersionId: VersionId;
+    }) => resolve(payload);
+  }),
+  loadDiff: createAction('LOAD_DIFF', (resolve) => {
+    return (payload: {
+      addonId: number;
+      baseVersionId: VersionId;
+      headVersionId: VersionId;
+      version: ExternalVersionWithDiff;
+    }) => resolve(payload);
+  }),
 };
 
 export type VersionsState = {
   byAddonId: {
     [addonId: number]: VersionsMap;
+  };
+  diffsByPath: {
+    [key: string]: CompareInfoMap | null;
   };
   versionInfo: {
     [versionId: number]: Version;
@@ -225,6 +260,7 @@ export type VersionsState = {
 
 export const initialState: VersionsState = {
   byAddonId: {},
+  diffsByPath: {},
   versionInfo: {},
   versionFiles: {},
 };
@@ -266,7 +302,7 @@ export const createInternalVersionAddon = (
 };
 
 export const createInternalVersion = (
-  version: ExternalVersionWithContent,
+  version: ExternalVersionWithContent | ExternalVersionWithDiff,
 ): Version => {
   return {
     addon: createInternalVersionAddon(version.addon),
@@ -356,6 +392,12 @@ export const fetchVersion = ({
       _log.error(`TODO: handle this error response: ${response.error}`);
     } else {
       dispatch(actions.loadVersionInfo({ version: response }));
+      dispatch(
+        actions.loadVersionFile({
+          version: response,
+          path: response.file.selected_file,
+        }),
+      );
     }
   };
 };
@@ -489,6 +531,80 @@ export const createInternalDiffs = ({
   );
 };
 
+type FetchDiffParams = {
+  _getDiff?: typeof getDiff;
+  _log?: typeof log;
+  addonId: number;
+  baseVersionId: number;
+  headVersionId: number;
+  path?: string;
+};
+
+export const fetchDiff = ({
+  _getDiff = getDiff,
+  _log = log,
+  addonId,
+  baseVersionId,
+  headVersionId,
+  path,
+}: FetchDiffParams): ThunkActionCreator => {
+  return async (dispatch, getState) => {
+    const { api: apiState } = getState();
+
+    dispatch(actions.beginFetchDiff({ addonId, baseVersionId, headVersionId }));
+
+    const response = await _getDiff({
+      addonId,
+      apiState,
+      baseVersionId,
+      headVersionId: 123,
+      path,
+    });
+
+    if (isErrorResponse(response)) {
+      _log.error(`TODO: handle this error response: ${response.error}`);
+      dispatch(
+        actions.abortFetchDiff({ addonId, baseVersionId, headVersionId }),
+      );
+    } else {
+      dispatch(actions.loadVersionInfo({ version: response }));
+      dispatch(
+        actions.loadDiff({
+          addonId,
+          baseVersionId,
+          headVersionId,
+          version: response,
+        }),
+      );
+    }
+  };
+};
+
+type GetDiffsKeyParams = {
+  addonId: number;
+  baseVersionId: VersionId;
+  headVersionId: VersionId;
+};
+
+const getDiffsKey = ({
+  addonId,
+  baseVersionId,
+  headVersionId,
+}: GetDiffsKeyParams) => {
+  return `${addonId}/${baseVersionId}/${headVersionId}`;
+};
+
+export const getCompareInfoMap = (
+  versionsState: VersionsState,
+  addonId: number,
+  baseVersionId: number,
+  headVersionId: number,
+): CompareInfoMap | null => {
+  const key = getDiffsKey({ addonId, baseVersionId, headVersionId });
+
+  return versionsState.diffsByPath[key];
+};
+
 const reducer: Reducer<VersionsState, ActionType<typeof actions>> = (
   state = initialState,
   action,
@@ -502,14 +618,6 @@ const reducer: Reducer<VersionsState, ActionType<typeof actions>> = (
         versionInfo: {
           ...state.versionInfo,
           [version.id]: createInternalVersion(version),
-        },
-        versionFiles: {
-          [version.id]: {
-            ...state.versionFiles[version.id],
-            [version.file.selected_file]: createInternalVersionFile(
-              version.file,
-            ),
-          },
         },
       };
     }
@@ -549,6 +657,59 @@ const reducer: Reducer<VersionsState, ActionType<typeof actions>> = (
         byAddonId: {
           ...state.byAddonId,
           [addonId]: createVersionsMap(versions),
+        },
+      };
+    }
+    case getType(actions.beginFetchDiff): {
+      const { addonId, baseVersionId, headVersionId } = action.payload;
+      const key = getDiffsKey({ addonId, baseVersionId, headVersionId });
+
+      return {
+        ...state,
+        diffsByPath: {
+          ...state.diffsByPath,
+          [key]: {},
+        },
+      };
+    }
+    case getType(actions.abortFetchDiff): {
+      const { addonId, baseVersionId, headVersionId } = action.payload;
+      const key = getDiffsKey({ addonId, baseVersionId, headVersionId });
+
+      return {
+        ...state,
+        diffsByPath: {
+          ...state.diffsByPath,
+          [key]: null,
+        },
+      };
+    }
+    case getType(actions.loadDiff): {
+      const { addonId, baseVersionId, headVersionId, version } = action.payload;
+      const key = getDiffsKey({ addonId, baseVersionId, headVersionId });
+
+      const { entries, selectedPath } = getVersionInfo(state, headVersionId);
+      const entry = entries.find((e) => e.path === selectedPath);
+
+      if (!entry) {
+        return state;
+      }
+
+      return {
+        ...state,
+        diffsByPath: {
+          ...state.diffsByPath,
+          [key]: {
+            ...state.diffsByPath[key],
+            [selectedPath]: {
+              diffs: createInternalDiffs({
+                baseVersionId,
+                headVersionId,
+                version,
+              }),
+              mimeType: entry.mimeType,
+            },
+          },
         },
       };
     }

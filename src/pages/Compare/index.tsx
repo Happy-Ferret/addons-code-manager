@@ -2,19 +2,24 @@ import * as React from 'react';
 import { Col, Row } from 'react-bootstrap';
 import { RouteComponentProps } from 'react-router-dom';
 import { connect } from 'react-redux';
-import { parseDiff } from 'react-diff-view';
 
 import { ApplicationState, ConnectedReduxProps } from '../../configureStore';
 import FileTree from '../../components/FileTree';
 import DiffView from '../../components/DiffView';
 import Loading from '../../components/Loading';
 import VersionChooser from '../../components/VersionChooser';
-import { Version, fetchVersion, getVersionInfo } from '../../reducers/versions';
+import {
+  CompareInfoMap,
+  Version,
+  actions as versionsActions,
+  fetchDiff,
+  getCompareInfoMap,
+  getVersionInfo,
+} from '../../reducers/versions';
 import { gettext } from '../../utils';
-import diffWithDeletions from '../../components/DiffView/fixtures/diffWithDeletions';
 
 export type PublicProps = {
-  _fetchVersion: typeof fetchVersion;
+  _fetchDiff: typeof fetchDiff;
 };
 
 type PropsFromRouter = {
@@ -26,6 +31,7 @@ type PropsFromRouter = {
 
 type PropsFromState = {
   addonId: number;
+  compareInfoMap: CompareInfoMap | null;
   version: Version;
 };
 
@@ -36,7 +42,7 @@ type Props = RouteComponentProps<PropsFromRouter> &
 
 export class CompareBase extends React.Component<Props> {
   static defaultProps = {
-    _fetchVersion: fetchVersion,
+    _fetchDiff: fetchDiff,
   };
 
   componentDidMount() {
@@ -71,21 +77,43 @@ export class CompareBase extends React.Component<Props> {
       baseVersionId !== prevProps.match.params.baseVersionId ||
       headVersionId !== prevProps.match.params.headVersionId
     ) {
-      const { dispatch, _fetchVersion } = this.props;
+      const { dispatch, _fetchDiff } = this.props;
 
       dispatch(
-        _fetchVersion({
+        _fetchDiff({
           addonId: parseInt(addonId, 10),
-          versionId: parseInt(baseVersionId, 10),
+          baseVersionId: parseInt(baseVersionId, 10),
+          headVersionId: parseInt(headVersionId, 10),
         }),
       );
     }
   }
 
-  onSelectFile = () => {};
+  onSelectFile = (path: string) => {
+    const { _fetchDiff, compareInfoMap, dispatch, match } = this.props;
+    const { addonId, baseVersionId, headVersionId } = match.params;
+
+    dispatch(
+      versionsActions.updateSelectedPath({
+        selectedPath: path,
+        versionId: parseInt(headVersionId, 10),
+      }),
+    );
+
+    if (!compareInfoMap || !compareInfoMap[path]) {
+      dispatch(
+        _fetchDiff({
+          addonId: parseInt(addonId, 10),
+          baseVersionId: parseInt(baseVersionId, 10),
+          headVersionId: parseInt(headVersionId, 10),
+          path,
+        }),
+      );
+    }
+  };
 
   render() {
-    const { addonId, version } = this.props;
+    const { addonId, compareInfoMap, version } = this.props;
 
     if (!version) {
       return (
@@ -94,6 +122,9 @@ export class CompareBase extends React.Component<Props> {
         </Col>
       );
     }
+
+    const fetchDiffHasFailed = compareInfoMap === null;
+    const compareInfo = compareInfoMap && compareInfoMap[version.selectedPath];
 
     return (
       <React.Fragment>
@@ -108,10 +139,15 @@ export class CompareBase extends React.Component<Props> {
           </Row>
           <Row>
             <Col>
-              <DiffView
-                diffs={parseDiff(diffWithDeletions)}
-                mimeType="text/javascript"
-              />
+              {fetchDiffHasFailed && <p>ERROR</p>}
+              {compareInfo ? (
+                <DiffView
+                  diffs={compareInfo.diffs}
+                  mimeType={compareInfo.mimeType}
+                />
+              ) : (
+                <Loading message={gettext('Loading diff...')} />
+              )}
             </Col>
           </Row>
         </Col>
@@ -127,11 +163,20 @@ const mapStateToProps = (
   const { match } = ownProps;
   const addonId = parseInt(match.params.addonId, 10);
   const baseVersionId = parseInt(match.params.baseVersionId, 10);
+  const headVersionId = parseInt(match.params.headVersionId, 10);
 
-  const version = getVersionInfo(state.versions, baseVersionId);
+  // The Compare API returns the version info of the head/newest version.
+  const version = getVersionInfo(state.versions, headVersionId);
+  const compareInfoMap = getCompareInfoMap(
+    state.versions,
+    addonId,
+    baseVersionId,
+    headVersionId,
+  );
 
   return {
     addonId,
+    compareInfoMap,
     version,
   };
 };
